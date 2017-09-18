@@ -1,7 +1,9 @@
+# This file defines model class for DB table TestInputData which capture test details for view, update, delete test
+# details in the DB. This file also implement other class which provide basic routines for updating test details in DB
+
 #!/usr/bin/env python
-# -*- coding:cp949 -*-
 # DB tables to refer
-#TestInputData,
+# TestInputData,
 #  testid
 #  frameworkid
 #  start_time
@@ -11,10 +13,10 @@
 #  stathostname
 #  timeout
 
-#TestArgs,
+# TestArgs,
 #  exec script args
 
-#ApplicationFrameworkMetadata
+# ApplicationFrameworkMetadata
 #  execution_script_location
 
 from logger import LOG
@@ -57,11 +59,19 @@ class testObj():
         self.TestInputData = TestInputData()
 
     def SerializeToString(self):
+        """
+        Serialize TestInputData object into string
+
+        """
         pickled_string = cPickle.dumps(self.TestInputData)
         ret = base64.b64encode(pickled_string)
         return ret
 
-    def ParseFromString(self,h):
+    def ParseFromString(self, h):
+        """
+        De-serialize pickled string into TestInputData object
+
+        """
         pickled_string = base64.b64decode(h)
         self.TestInputData = cPickle.loads(pickled_string)
         return
@@ -69,7 +79,7 @@ class testObj():
 
 class testDefn():
     def __init__(self):
-        self.db = None #dbaccess.DBAccess(LOG.getLogger("dblog", "DH"))
+        self.db = None  # dbaccess.DBAccess(LOG.getLogger("dblog", "DH"))
         self.testobj = testObj()
 
     def __del__(self):
@@ -86,7 +96,11 @@ class testDefn():
         return self.testobj.SerializeToString()
 
     def construct(self, tid):
-	import dbaccess
+        """
+        Contruct TestInputData object by query DB details for fetching test information for a given testid tid
+
+        """
+        import dbaccess
         import config
 
         lctx = LOG.getLogger("dblog", "DH")
@@ -94,10 +108,13 @@ class testDefn():
         cfg.readCFG("config.ini")
         self.db = dbaccess.DBAccess(cfg, LOG.getLogger("dblog", "DH"))
         self.testobj.TestInputData.testid = tid
+
+        # Query TestInputData table for test details
         query_result = self.db.query("""select testid, frameworkid, start_time,
                                       end_time, end_status,
                                       timeout, cc_list, title, purpose, creation_time
-                                      from TestInputData where testid = %s""", (self.testobj.TestInputData.testid, ), False, False);
+                                      from TestInputData where testid = %s""", (self.testobj.TestInputData.testid,),
+                                     False, False);
 
         (self.testobj.TestInputData.testid, self.testobj.TestInputData.frameworkid,
          self.testobj.TestInputData.start_time, self.testobj.TestInputData.end_time,
@@ -106,19 +123,20 @@ class testDefn():
          self.testobj.TestInputData.purpose, self.testobj.TestInputData.creation_time) = query_result
         lctx.debug(query_result)
 
-
+        # Query test host details from HostAssociation table
         query_result = self.db.query("""select ha.hostname, hat.name, hat.shared, hat.execution, hat.statistics
                                               from HostAssociation ha
                                               join  HostAssociationType hat
                                               on ha.hostassociationtypeid = hat.hostassociationtypeid
                                               where testid = %s and hat.frameworkid = %s""",
-                                     (self.testobj.TestInputData.testid,self.testobj.TestInputData.frameworkid ), True, False);
+                                     (self.testobj.TestInputData.testid, self.testobj.TestInputData.frameworkid), True,
+                                     False);
 
         for r in query_result:
             lctx.debug(r)
-            if r[1] == 'statistics' and r[4] == 1 :
+            if r[1] == 'statistics' and r[4] == 1:
                 self.testobj.TestInputData.stathostname = r[0] + "," + self.testobj.TestInputData.stathostname
-            elif r[1] == 'execution' and r[3] == 1 :
+            elif r[1] == 'execution' and r[3] == 1:
                 self.testobj.TestInputData.exechostname = r[0] + "," + self.testobj.TestInputData.exechostname
 
         self.testobj.TestInputData.stathostname = self.testobj.TestInputData.stathostname[:-1]
@@ -127,22 +145,30 @@ class testDefn():
         lctx.debug(self.testobj.TestInputData.exechostname)
         lctx.debug(self.testobj.TestInputData.stathostname)
 
-        query_result = self.db.query("""select * from TestArgs where testid = %s""", (self.testobj.TestInputData.testid, ), True, False);
+        # Query test argument values from TestArgs table
+        query_result = self.db.query("""select * from TestArgs where testid = %s""",
+                                     (self.testobj.TestInputData.testid,), True, False);
         self.testobj.TestInputData.execScriptArgs = query_result
         lctx.debug(query_result)
 
-        query_result = self.db.query("""select execution_script_location, frameworkname from ApplicationFrameworkMetadata where frameworkid = %s""", (self.testobj.TestInputData.frameworkid, ), False, False);
+        # Query execution script location and framework name from ApplicationFrameworkMetadata
+        query_result = self.db.query(
+            """select execution_script_location, frameworkname from ApplicationFrameworkMetadata where frameworkid = %s""",
+            (self.testobj.TestInputData.frameworkid,), False, False);
         (self.testobj.TestInputData.execution_script_location, self.testobj.TestInputData.frameworkname) = query_result
         lctx.debug(query_result)
 
+        # Query STRACE profiler information for this test, if any
         query_result = self.db.query(
             """select processname, delay, duration from ProfilerFramework where testid = %s and profiler = %s""",
-            (self.testobj.TestInputData.testid,'STRACE'), False, False);
+            (self.testobj.TestInputData.testid, 'STRACE'), False, False);
 
         if query_result:
             self.testobj.TestInputData.strace = True
-            (self.testobj.TestInputData.strace_process, self.testobj.TestInputData.strace_delay, self.testobj.TestInputData.strace_duration) = query_result
+            (self.testobj.TestInputData.strace_process, self.testobj.TestInputData.strace_delay,
+             self.testobj.TestInputData.strace_duration) = query_result
 
+        # Query PERF profiler information for this test, if any
         query_result = self.db.query(
             """select processname, delay, duration from ProfilerFramework where testid = %s and profiler = %s""",
             (self.testobj.TestInputData.testid, 'PERF'), False, False);
@@ -152,32 +178,50 @@ class testDefn():
              self.testobj.TestInputData.perf_duration) = query_result
 
     def updateStatus(self, curStatus, newStatus):
+        """
+        Update test status from curStatus to newStatus in database for a given test.
+
+        """
         lctx = LOG.getLogger("dblog", "DH")
-        lctx.debug("setting status from %s to %s" %(curStatus, newStatus))
-	if self.testobj.TestInputData.exec_results_path is not None:
-	    test_logger = LOG.gettestlogger(self, "EXEC")
-            test_logger.info("Setting test status from %s to %s" %(curStatus, newStatus))
-        update_res = self.db.query("""update TestInputData SET end_status = %s where testid=%s""", (newStatus, self.testobj.TestInputData.testid), False, True);
+        lctx.debug("setting status from %s to %s" % (curStatus, newStatus))
+        if self.testobj.TestInputData.exec_results_path is not None:
+            test_logger = LOG.gettestlogger(self, "EXEC")
+            test_logger.info("Setting test status from %s to %s" % (curStatus, newStatus))
+        update_res = self.db.query("""update TestInputData SET end_status = %s where testid=%s""",
+                                   (newStatus, self.testobj.TestInputData.testid), False, True);
         self.testobj.TestInputData.end_status = newStatus
-        update_res = self.db.query("""update CommonFrameworkSchedulerQueue SET state = %s, message = %s, state_detail = %s where testid = %s""", (newStatus, newStatus, newStatus, self.testobj.TestInputData.testid), False, True)
+        update_res = self.db.query(
+            """update CommonFrameworkSchedulerQueue SET state = %s, message = %s, state_detail = %s where testid = %s""",
+            (newStatus, newStatus, newStatus, self.testobj.TestInputData.testid), False, True)
 
         if newStatus == "finished clean" or newStatus == "failed" or newStatus == "abort" or newStatus == "kill" or newStatus == "timeout clean":
-            update_res = self.db.query("""delete from CommonFrameworkSchedulerQueue where testid=%s""", (self.testobj.TestInputData.testid, ), False, True);
-            lctx.debug("Deleted entry from CommonFrameworkSchedulerQueue because of failure for : " + str(self.testobj.TestInputData.testid))
+            update_res = self.db.query("""delete from CommonFrameworkSchedulerQueue where testid=%s""",
+                                       (self.testobj.TestInputData.testid,), False, True);
+            lctx.debug("Deleted entry from CommonFrameworkSchedulerQueue because of failure for : " + str(
+                self.testobj.TestInputData.testid))
 
         return
 
     def updateStartTime(self, timestr):
+        """
+        Update test execution start time in database
+
+        """
         lctx = LOG.getLogger("dblog", "DH")
-        lctx.debug("setting start time  to %s" %(timestr))
-        update_res = self.db.query("""update TestInputData SET start_time = %s where testid=%s""", (timestr, self.testobj.TestInputData.testid), False, True);
+        lctx.debug("setting start time  to %s" % (timestr))
+        update_res = self.db.query("""update TestInputData SET start_time = %s where testid=%s""",
+                                   (timestr, self.testobj.TestInputData.testid), False, True);
         self.testobj.TestInputData.start_time = timestr
         return
 
     def updateEndTime(self, timestr):
+        """
+        Update test execution end time in database
+
+        """
         lctx = LOG.getLogger("dblog", "DH")
-        lctx.debug("setting end time  to %s" %(timestr))
-        update_res = self.db.query("""update TestInputData SET end_time = %s where testid=%s""", (timestr, self.testobj.TestInputData.testid), False, True);
+        lctx.debug("setting end time  to %s" % (timestr))
+        update_res = self.db.query("""update TestInputData SET end_time = %s where testid=%s""",
+                                   (timestr, self.testobj.TestInputData.testid), False, True);
         self.testobj.TestInputData.start_time = timestr
         return
-

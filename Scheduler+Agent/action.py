@@ -1,5 +1,9 @@
+# This file implements all actions performed by agent to start execution script on exec host and sar data collection
+# from all exec and stat hosts. Each procedure is mapped with particular daytona command used by scheduler to
+# communicate with agent. Upon recieving command from daytona scheduler, agent execute below procedure
+# which is mapped with that particular daytona command
+
 #!/usr/bin/env python
-# -*- coding:cp949 -*-
 import subprocess
 import threading
 import common
@@ -21,12 +25,19 @@ cfg = config.CFG("DaytonaHost", lctx)
 cfg.readCFG("config.ini")
 EXEC_SCRIPT_DIR = cfg.execscript_location
 
+# Agent on a particular host maintains a list of tests it is currently executing and it also keep updating test data.
+# It's a key-value pair map in which each class object is associated with test ID
 running_tests = {}
 action_lock = threading.Lock()
 exec_script_pid = {}
 exec_script_lock = threading.Lock()
 
 class activeTest:
+    """
+      This class defines a test object which capture all the information of the test. Agent save these test objects
+      in a queue to maintain information of all running tests.
+
+    """
     def __init__(self, testid, actionID, exec_thread, testobj):
         self.testid = testid
         self.actionID = actionID
@@ -55,6 +66,11 @@ class activeTest:
 
 
 class commandThread(threading.Thread):
+    """
+      This class creates child thread for starting execution script or executing any other linux based command to get
+      output from the system
+
+    """
     def __init__(self, cmdstr, dcmdstr, streamfile, cdir, testid):
         self.cmd = cmdstr
         self.dcmd = dcmdstr
@@ -96,7 +112,15 @@ class commandThread(threading.Thread):
         lctx.debug(self.cmd)
         ca = self.cmd.split(" ")
         lctx.debug(ca)
-	p = subprocess.Popen(ca, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.cwd, preexec_fn=os.setsid)
+
+        # os.setsid is used for creating a new pid group for this exec script excuting so that any subsequent
+        # child thread or another script invocation will remain in same PID group. In the event of timer expire or if
+        # something goes wrong, we will just kill this PID group to kill everything.
+
+        p = subprocess.Popen(ca, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.cwd,
+                             preexec_fn=os.setsid)
+
+        # Saving PID information for keeping track of PID group
 	exec_script_lock.acquire()
         exec_script_pid[self.testid] = p
         exec_script_lock.release()
@@ -113,6 +137,14 @@ class commandThread(threading.Thread):
         self.sfile.flush()
 
 def get_test(testid):
+    """
+    This command get the test object from the running queue of agent. It accquire lock on the queue to avoid mutual
+    exclusion situtation. Mutilple threads might be excuting actions for a particular test
+
+    :param testid: It takes test ID as argument to fetch the test object
+    :return: test object if found in the queue
+
+    """
     found = False
     current_test = None
     action_lock.acquire()
@@ -127,6 +159,14 @@ def get_test(testid):
 
 
 def save_test(testid, test):
+    """
+    This procedure is called to update test information in agent queue.
+
+    :param testid: Test ID is a key in running test queue
+    :param test: Updated test object which need to be saved in running queue
+    :return: true if update is successfull
+
+    """
     found = False
     action_lock.acquire()
     if testid in running_tests:
@@ -137,6 +177,14 @@ def save_test(testid, test):
 
 
 def delete_test(testid):
+    """
+    This procedure delete the test information from the running queue. This will happen if test execution ends or
+    something goes wrong with the test
+
+    :param testid: Test ID to identify test in running queue
+    :return: NA
+
+    """
     action_lock.acquire()
     if testid in running_tests:
         del running_tests[testid]
@@ -144,6 +192,11 @@ def delete_test(testid):
 
 
 def exec_cmd(cmd, daytona_cmd, sync, obj, actionid, current_test):
+    """
+    This procedure does the setup for starting execution script. It creates object of child process which execute
+    startup script
+
+    """
     lctx.debug("Execute cmd : " + cmd)
     sfile = None
     cl = None
@@ -189,9 +242,7 @@ def exec_cmd(cmd, daytona_cmd, sync, obj, actionid, current_test):
                     lctx.error("Timer expired for this test, need to end this async action")
                     timer_expire = True
 
-            # todo : breakout of while after a timer event and exit after terminating thread
-            # timeout is monitored outside in the scheduler server , for all async ops , the thread is paused from
-            # there via a CMD (ENDTEST)
+	    # Exit from this while loop if timer expires or execution script ends
             if t.check() == False or cthread.is_alive() == False or timer_expire:
                 if daytona_cmd == "DAYTONA_START_TEST":
 		    if cthread.is_alive():
@@ -216,7 +267,6 @@ def exec_cmd(cmd, daytona_cmd, sync, obj, actionid, current_test):
             time.sleep(3)
 
     if daytona_cmd == "DAYTONA_START_TEST":
-        # todo : verify the TEST END on filesystem OR Failure
         if timer_expire:
             current_test.status = "TIMEOUT"
         else:
@@ -231,12 +281,16 @@ def exec_cmd(cmd, daytona_cmd, sync, obj, actionid, current_test):
         return "ERROR"
 
 
-def log(self, *args):
-    (obj, command, test_serialized, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
-    lctx.debug(args)
-
-
 def scheduler_handshake(current_test):
+    """
+    This procedure is a part of 2-way handshake between scheduler and agent. If agent receive handshake message from
+    scheduler, then agent also send a handshake message to scheduler to check if agent can communicate with scheduler
+    on scheduler port. This part is important as later we need to transfer log files to scheduler using scheduler port
+
+    :param current_test: Test object
+    :return: true if scheduler respond otherwise false
+
+    """
     cl = client.TCPClient(LOG.getLogger("clientlog", "Agent"))
     env = envelope.DaytonaEnvelope()
     ret = cl.send(current_test.serverip, current_test.serverport, env.construct("DAYTONA_HANDSHAKE", "handshake2"))
@@ -247,6 +301,19 @@ def scheduler_handshake(current_test):
 
 
 def setupTest(self, *args):
+    """
+    Test setup is called when scheduler send "DAYTONA_SETUP_TEST" message to agent. In this procedure agent create
+    all necessary file system path string and update in test object. After creating file path string it execute command
+    for making all these file system directories so that agent can later save SAR data. On exec host, it copies execution
+    script from Execscript folder to test specific directory in order to keep execution script seperate in case of
+    multiple test execution
+
+    :param self:
+    :param args: tuple of arguments containing obj, command, parameter sent by scheduler to agent for this command,
+    actionID and sync flag to denote if we need to execute this procedure in sync or async mode
+    :return: SUCCESS in case everything goes well otherwise it throws ERROR
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     test_serialized = params.split(",")[0]
     host_type = params.split(",")[1]
@@ -294,9 +361,6 @@ def setupTest(self, *args):
 
 	    test_logger.info("Test directory created")
 
-            # todo : check and validate if exec script is provided in expected format and
-            # the file exists in that location
-
             if host_type == "EXEC":
                 execscript = current_test.tobj.testobj.TestInputData.execution_script_location
                 lctx.debug("TEST SETUP : " + str(execscript))
@@ -312,7 +376,8 @@ def setupTest(self, *args):
 
                 if valid_path:
                     if os.path.isfile(execscript_location):
-			ret = shutil.copytree(os.path.dirname(execscript_location), os.path.dirname(current_test.execscriptfile))
+                        ret = shutil.copytree(os.path.dirname(execscript_location),
+                                              os.path.dirname(current_test.execscriptfile))
                     else:
                         raise Exception(
                             "Execution script not found at Daytona Execution Script Location : " + EXEC_SCRIPT_DIR)
@@ -345,6 +410,11 @@ def setupTest(self, *args):
 
 
 def startTest(self, *args):
+    """
+    This procedure is invoked for STRACE and PERF profiler setup on exec/stat host. On exec host, after setting up
+    profilier it starts execution of exec script
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params.split(",")[0])
     host_type = params.split(",")[1]
@@ -377,6 +447,7 @@ def startTest(self, *args):
 	    if strace_config is not None:
 	        test_logger.info("Configuring strace profiler - " + str(strace_config))
 
+            # Setting up STRACE and PERF configuration
             system_metrics_gather.perf_strace_gather(current_test.testid, perf_config, strace_config)
 	    test_logger.info("Profiler started")
 
@@ -406,6 +477,12 @@ def startTest(self, *args):
 
 
 def stopTest(self, *args):
+    """
+    This procedure is invoked by agent when it receives DAYTONA_STOP_TEST message from scheduler. In current test
+    life cycle stat host agent receive this message from scheduler. In this procedure, agent changes the state of a
+    test from RUNNING to TESTEND and update running queue
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params)
     current_test = get_test(testid)
@@ -429,6 +506,16 @@ def stopTest(self, *args):
 
 
 def cleanup(self, *args):
+    """
+    This procedure is called on test completion or timer expiry or if something goes wrong with test. It perform
+    below tasks:
+
+    * Download agent side test execution life cycle logs
+    * remove the logger object for this particular test
+    * Delete the test logs file system
+    * Delete the test from running queue of agent
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params)
     current_test = get_test(testid)
@@ -455,6 +542,13 @@ def cleanup(self, *args):
 
 
 def abortTest(self, *args):
+    """
+    This procedure is invoked by agent whenever scheduler send DAYTONA_ABORT_TEST message. This happend in case
+    something goes wrong on exec host or user cancelled test execution and scheduler want to terminate this test on
+    all the hosts it has started this particular test. It basically stop execution script thread to stop execution and
+    call cleanup procedure for downloading logs and other cleanups
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params)
     current_test = get_test(testid)
@@ -486,10 +580,19 @@ def abortTest(self, *args):
 
 
 def heartbeat(self, *args):
+    """
+    It send "ALIVE" message in response to any hearbeat message received.
+
+    """
     return "ALIVE"
 
 
 def setFinish(self, *args):
+    """
+    Agent invoke this procedure when scheduler send DAYTONA_FINISH_TEST message for gracefully ending test on all the
+    hosts. It just calls cleanup procedure for test cleanup and test life cycle logs download
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params)
     cleanup(self, self, command, params, actionID, sync)
@@ -497,6 +600,11 @@ def setFinish(self, *args):
 
 
 def getStatus(self, *args):
+    """
+    Agent execute this procedure whenever scheduler want to check state of a test by sending DAYTONA_GET_STATUS
+    message to agent. In this procedure we fetch the test from running queue and return saved test state information
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     testid = int(params)
     current_test = get_test(testid)
@@ -510,6 +618,12 @@ def getStatus(self, *args):
 
 
 def fileDownload(self, *args):
+    """
+    On test completion, agent execute this procedure when it receive DAYTONA_FILE_DOWNLOAD message from scheduler.
+    We create a TAR file called results.tgz and save it test location, then we send this file to scheduler and save it
+    in scheduler side file system
+
+    """
     cl = client.TCPClient(LOG.getLogger("clientlog", "Agent"))
     testid = int(args[2])
     current_test = get_test(testid)
@@ -538,6 +652,11 @@ def fileDownload(self, *args):
 
 
 def downloadTestLogs(testid):
+    """
+    This procedure just send test life cycle log file to scheduler upon test cleanup. This file provide user
+    information about test execution sequence on agent
+
+    """
     cl = client.TCPClient(LOG.getLogger("clientlog", "Agent"))
     current_test = get_test(testid)
     test_logger = None

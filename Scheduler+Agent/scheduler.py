@@ -1,6 +1,14 @@
-#!/usr/bin/env python
-# -*- coding:cp949 -*-
+# This is main file for scheduler process which does all the setup for scheduler process. It start 4 threads for
+# performing test execution and SAR data collection. It communicate with agent process of each host
+# (execution or statistic host) mentioned in test details and send daytona commands to agent for executing test
+# and stat collection. Thread details are as follows:
+# 1. Database Monitor Thread
+# 2. Dispatch Thread
+# 3. Testmon Thread
+# 4. Server Thread for listening agent messages
 
+
+#!/usr/bin/env python
 import threading
 import socket
 import time
@@ -19,7 +27,12 @@ from logger import LOG
 import csv
 import process_files
 
+
 class Scheduler:
+    """
+    Main scheduler class which implement all scheduler related procedures. Each function is explained later
+
+    """
     scheduler_thread = None
     testmon_thread = None
     lock = threading.Lock()
@@ -28,6 +41,10 @@ class Scheduler:
     dispatch_queue = defaultdict()
 
     def __init__(self, db, cfg, lctx):
+        """
+        Scheduler class constructor which initialize class variables and other threads
+
+        """
         self.dbinstance = db
         self.cfg = cfg
         self.testmap = db.tests_to_run
@@ -41,16 +58,12 @@ class Scheduler:
         self.testmon_thread = common.FuncThread(self.testmon, True)
         self.lctx = lctx
 
-
     def process_results(self, *args):
-        # set test status completed
-        # call stop monitors
-        # send prepare results command to exec
-        # set test status collating
-        # copy results files from exec
-        # copy files from each mon
-        # set test status finished
-        # remove test from running Q
+        """
+        This procedure is called by testmon as seperate thread when test execution ends or test timeout occur
+        on agent.
+
+        """
         t = args[1]
         status = args[2]
 
@@ -58,6 +71,7 @@ class Scheduler:
         t2 = testobj.testDefn()
         t2.deserialize(serialize_str)
 
+	# Setting up test logger for capturing test life cycle on scheduler
 	test_logger = LOG.gettestlogger(t2, "EXEC")
         test_logger.info("Test execution completes, preocessing test results")
 
@@ -66,6 +80,7 @@ class Scheduler:
                 lctx.error("testobj not same")
                 raise Exception("Test objects do not match : ", t2.testobj.TestInputData.testid)
 
+	    # set test status to collating
             if t.testobj.TestInputData.timeout_flag:
                 t.updateStatus("timeout", "collating")
             else:
@@ -74,9 +89,13 @@ class Scheduler:
             ip = t.testobj.TestInputData.exechostname
             lctx.debug(status)
             if status in ["completed", "timeout"]:
+
+		# Initiate instance of ProcessOutputFiles for docker and top outout file processing
                 ptop = process_files.ProcessOutputFiles(LOG.getLogger("processTop", "DH"))
-                # todo : avoid send client its own ip
+
                 lctx.info("SENDING results.tgz download to : " + ip + ":" + str(self.CPORT))
+		# send file download command to exec host (no need to send stop test as this procedure is invoked due
+                # to test end on exec host)
                 retsend = self.cl.send(ip, self.CPORT,
                                        self.ev.construct("DAYTONA_FILE_DOWNLOAD", str(t2.testobj.TestInputData.testid)))
                 lctx.debug(retsend)
@@ -86,6 +105,7 @@ class Scheduler:
                 else:
                     test_logger.info("Logs download successfull from exec host " + ip)
 
+		# copy results files from exec to daytona file system and untar results
                 try:
                     lctx.debug(
                         "Untar file : " + t2.testobj.TestInputData.exec_results_path + "results.tgz to location : " + 
@@ -97,10 +117,12 @@ class Scheduler:
                     test_logger.error("Error in untar EXEC host results")
                     lctx.error(e)
 
+		# process top and docker stat files downloaded from exec host
 		ptop_ret = ptop.process_output_files(t2.testobj.TestInputData.stats_results_path[ip] + "sar/")
                 lctx.debug(ptop_ret + " : " + t2.testobj.TestInputData.stats_results_path[ip])
                 test_logger.info("Exec host logs extracted and processed succesfully")
 
+		# send DAYTONA_FINISH_TEST to exec host for finishing and test cleanup
                 retsend = self.cl.send(ip, self.CPORT,
                                        self.ev.construct("DAYTONA_FINISH_TEST", str(t2.testobj.TestInputData.testid)))
                 lctx.debug(retsend)
@@ -115,7 +137,10 @@ class Scheduler:
 
                     p = self.CPORT
                     try:
-
+			# Send DAYTONA_STOP_TEST on all agent hosts to stop SAR data collection after test finish on
+                        # exec host. This message is required to tell stat hosts that test execution is finished on
+                        # exec host. Upon receiving this message on stat host, agent will change test state to TESTEND
+                        # and then other SAR data collection thread will stop writing log files for this test.
 			lctx.info("Stopping test on stat host : " + s)
                         retsend = self.cl.send(s.strip(), p, self.ev.construct("DAYTONA_STOP_TEST",
                                                                                str(t2.testobj.TestInputData.testid)))
@@ -126,6 +151,7 @@ class Scheduler:
                         else:
                             test_logger.info("Test stopped on stat host " + s)
 
+			# send file download command to stat host
                         lctx.info("Sending results.tgz download to :" + s.strip() + ":" + str(p))
                         retsend = self.cl.send(s.strip(), p, self.ev.construct("DAYTONA_FILE_DOWNLOAD",
                                                                                str(t2.testobj.TestInputData.testid)))
@@ -136,31 +162,39 @@ class Scheduler:
                         else:
                             test_logger.info("Logs downloaded from stat host " + s)
 
+			# copy results files from stat host to daytona file system and untar results
                         lctx.debug("Untar file : " + t2.testobj.TestInputData.stats_results_path[
                             s] + "results.tgz to location : " + t2.testobj.TestInputData.stats_results_path[s] + "/../")
                         common.untarfile(t2.testobj.TestInputData.stats_results_path[s] + "/results.tgz",
                                          t2.testobj.TestInputData.stats_results_path[s] + "/../")
 
+			# process top and docker stat files downloaded from stat host
 			ptop_ret = ptop.process_output_files(t2.testobj.TestInputData.stats_results_path[s] + "sar/")
                         lctx.debug(ptop_ret + " : " + t2.testobj.TestInputData.stats_results_path[s])
                         test_logger.info("Stat host " + s + " logs extracted and processed succesfully")
 
+			# send DAYTONA_FINISH_TEST to exec host for finishing and test cleanup
                         retsend = self.cl.send(s.strip(), p, self.ev.construct("DAYTONA_FINISH_TEST",
                                                                                str(t2.testobj.TestInputData.testid)))
                         lctx.debug(retsend)
                         test_logger.info("Test END successfull on stat host " + s)
                     except Exception as e:
+			# Just continue with other stat hosts if any exception occurs while working on any particular
+                        # host (Continue only when something goes wrong with stat host, because we still want to
+                        # download logs from other stat hosts)
                         lctx.error(e)
                         test_logger.error(e)
                         continue
 
         except Exception as e:
+	    # Throw an error if anything goes wrong with finishing test on exec host and set test state to failed
             lctx.error("Error in processing results")
             lctx.error(e)
             test_logger.error("Error in processing results")
             test_logger.error(e)
             t.updateStatus("collating", "failed")
 
+        # updating test state to timeout clean if test terminated due to timeout else setting it to finished clean
         if t.testobj.TestInputData.timeout_flag:
             t.updateStatus("collating", "timeout clean")
         else:
@@ -168,8 +202,13 @@ class Scheduler:
 
         now = time.time()
         tstr = str(time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)))
+        # update test end time in database
         t.updateEndTime(tstr)
         f = None
+
+        # Formatting email with results.csv details to send it to CC list if user has mentioned in test details
+        # (admin need to smtp server for this functionality to work, smtp server details need to be
+        # mentioned in config.sh)
         try:
             f = open(t2.testobj.TestInputData.exec_results_path + "/results.csv")
         except IOError as e:
@@ -227,8 +266,12 @@ class Scheduler:
 
 
     def trigger(self, *args):
-        # trigger starts in a thread, keep track of all triggers and they should complete in a specified time,
-        # otherwise signal a close
+	"""
+        trigger starts in a thread, keep track of all triggers and they should complete in a specified time, otherwise
+        signal a close. triggers are used for test setup, then starting test and then taking test into running
+        state on agent.
+
+        """
         t = args[1]
 
         serialize_str = t.serialize();
@@ -236,6 +279,7 @@ class Scheduler:
         t2.deserialize(serialize_str)
         time.sleep(6)
 
+	# Setting up test logger for capturing test life cycle on scheduler
 	test_logger = LOG.gettestlogger(t2, "EXEC")
 	test_logger.info("Test setup started")
 
@@ -244,6 +288,9 @@ class Scheduler:
                 lctx.error("testobj not same")
                 raise Exception("test trigger error", t2.testobj.TestInputData.testid)
 
+	    # Sending DAYTONA_SETUP_TEST command on execution host, on receiving this command agent will perform basic
+	    # test setup by creating test directories for saving log files and it will copy execution script in test
+            # directory for starting execution
             ip = t.testobj.TestInputData.exechostname
             retsend = self.cl.send(ip, self.CPORT, self.ev.construct("DAYTONA_SETUP_TEST", serialize_str + ",EXEC"))
             lctx.debug(retsend)
@@ -257,7 +304,7 @@ class Scheduler:
 	    
 	    test_logger.info("Test setup complete on exec host " + ip)
 
-            # get statistics hosts
+	    # Triggering test setup on all stat hosts
             for s in t.testobj.TestInputData.stathostname.split(','):
                 if len(s.strip()) == 0:
                     break
@@ -265,6 +312,7 @@ class Scheduler:
                 lctx.debug(s.strip())
                 p = self.CPORT
 
+		# Sending hearbeat message to check whether stat host is up or not
                 retsend = self.cl.send(s, p, self.ev.construct("DAYTONA_HEARTBEAT", ""))
 
                 if retsend and len(retsend.split(",")) > 1:
@@ -272,8 +320,11 @@ class Scheduler:
                         raise Exception("Remove host not avaliable - No Heartbeat ", t2.testobj.TestInputData.testid)
                     else:
 			test_logger.info("Hearbeat received from stat host " + s)
+			# Trigger DAYTONA_HANDSHAKE to verify that both agent and scheduler are able to communicate with
+                        # each other on custom daytona ports
                         retsend = self.cl.send(s, p,
-                                               self.ev.construct("DAYTONA_HANDSHAKE", "handshake1," + self.HOST + "," + str(self.PORT) + "," + str(t2.testobj.TestInputData.testid) + "," + s))
+                                           self.ev.construct("DAYTONA_HANDSHAKE", "handshake1," + self.HOST + "," + str(
+                                               self.PORT) + "," + str(t2.testobj.TestInputData.testid) + "," + s))
                         lctx.debug(retsend)
                         if retsend == "SUCCESS":
                             alive = True
@@ -287,9 +338,7 @@ class Scheduler:
 		else:
                     raise Exception("Stat host " + s +  " not avaliable - No Heartbeat")
 
-                # start stats monitors on req hosts
-                # any host that blocks start monitor blocks the scheduling for the FW
-
+		# Trigger test setup on stat hosts, this will create test directory for saving log files
 		retsend = self.cl.send(s.strip(), p, self.ev.construct("DAYTONA_SETUP_TEST", serialize_str + ",STAT"))
                 lctx.debug(retsend)
 
@@ -302,7 +351,7 @@ class Scheduler:
 		
 		test_logger.info("Test setup complete on stat host " + s)
 
-            # Trigger the start of test to test box
+            # Trigger the start of test on exec host
             retsend = self.cl.send(ip, self.CPORT,
                                    self.ev.construct("DAYTONA_START_TEST", str(t2.testobj.TestInputData.testid) + ",EXEC"))
             lctx.debug(retsend)
@@ -334,7 +383,7 @@ class Scheduler:
 
 		test_logger.info("Test started on stat host " + s)
 
-            # Get status from tst box
+            # Get status from exec host
             retsend = self.cl.send(ip, self.CPORT,
                                    self.ev.construct("DAYTONA_GET_STATUS", str(t2.testobj.TestInputData.testid)))
 
@@ -358,6 +407,7 @@ class Scheduler:
                     # Killing of threads on client host and remove from list with status=fail is done in testmon
 
         except Exception as e:
+	    # If any trigger fails, then abort test startup with error
 	    lctx.error(e)
 	    test_logger.error(e)
             lctx.error("ERROR : Unknown trigger error : " + str(t.testobj.TestInputData.testid))
@@ -368,15 +418,18 @@ class Scheduler:
             del self.dispatch_queue[t.testobj.TestInputData.frameworkid]
             self.dispatchQ__lock.release()
 
+	    # This will abort test and perform cleanup on exec host with trigger was successful on exec host
             retsend = self.cl.send(ip, self.CPORT,
                                    self.ev.construct("DAYTONA_ABORT_TEST", str(t2.testobj.TestInputData.testid)))
             lctx.debug(retsend)
 	    test_logger.info("Test aborted on exec host " + ip)
 
+	    # On all other stat hosts we send cleanup in case trigger was successful on any stat host
             for s in t.testobj.TestInputData.stathostname.split(','):
                 if len(s.strip()) == 0:
                     break
-                retsend = self.cl.send(s.strip(), self.CPORT, self.ev.construct("DAYTONA_CLEANUP_TEST", str(t2.testobj.TestInputData.testid)))
+		retsend = self.cl.send(s.strip(), self.CPORT,
+                                       self.ev.construct("DAYTONA_CLEANUP_TEST", str(t2.testobj.TestInputData.testid)))
                 lctx.debug(retsend)
 		test_logger.info("Test abort on stat host " + s)
 
@@ -390,11 +443,23 @@ class Scheduler:
         self.scheduler_thread.stop()
 
     def dispatch(self, *args):
+        """
+        This is dispatch queue of scheduler where test from different framework wait in the waiting queue for scheduler to
+        bind it with trigger thread. This procedure continuously iterate over testmap populated by DBMon with tests
+        started by user from UI or CLI. This keep track of all running tests and it allows one test per framework. Once
+        this procedure find an open test spot for a test from particular framework, this procedure will pop it from testmap,
+        put it in dispatch queue and assign trigger thread for this test to start test setup and then execution.
+
+        """
         dispatch_threads = defaultdict()
         while True:
+	    # Continuously iterate on testmap for initiating any test execution
             for k in self.testmap:
+		# iterating for all frameworkid k in testmap which contains list of waiting tests for a particular framework
                 found = False
 		
+		# If test for a particular framework is already in running or dispatch queue then this new test need to
+		# wait until previous test gets finish, hence we do nothing and just continue
 		if k in self.dispatch_queue or k in self.running_tests:
                     found = True
                 else:
@@ -403,6 +468,7 @@ class Scheduler:
                 if found:
                     continue
 
+		# Proceed if spot is available for executing test for this framework
                 try:
                     tmp_t = self.testmap[k][0]
                 except Exception as e:
@@ -415,9 +481,12 @@ class Scheduler:
                 alive = False
 
                 h = tmp_t.testobj.TestInputData.exechostname
+
+		# Initiating test logger for capturing test life cycle on scheduler, all logs are logged in file <testid>.log
 		test_logger = LOG.init_testlogger(tmp_t, "EXEC")
 		test_logger.info("Test execution starts")
                 try:
+		    # Sending heartbeat on exec host to check if it agent is up on exec host
                     retsend = self.cl.send(h, self.CPORT, self.ev.construct("DAYTONA_HEARTBEAT", ""))
 
                     if retsend and len(retsend.split(",")) > 2:
@@ -427,8 +496,12 @@ class Scheduler:
 
                     if "ALIVE" == status:
 			test_logger.info("HeartBeat received from execution host " + h)
-                        ret = self.cl.send(h, self.CPORT,
-                                           self.ev.construct("DAYTONA_HANDSHAKE", "handshake1," + self.HOST + "," + str(self.PORT) + "," + str(tmp_t.testobj.TestInputData.testid) + "," + h))
+			# Sending DAYTONA_HANDSHAKE for verifying connectivity between scheduler and agent on exec host
+			# using custom daytona ports
+			ret = self.cl.send(h, self.CPORT,
+                                           self.ev.construct("DAYTONA_HANDSHAKE",
+                                                             "handshake1," + self.HOST + "," + str(self.PORT) + "," + str(
+                                                                 tmp_t.testobj.TestInputData.testid) + "," + h))
                         if ret == "SUCCESS":
                             alive = True
 			    test_logger.info("Handshake successful with execution host " + h)
@@ -453,7 +526,6 @@ class Scheduler:
                     self.dbinstance.mon_thread[0].resume()
 		    LOG.removeLogger(tmp_t)
                     continue
-                    # todo : add host to reg list if handshake successful
 
                 if alive == True and found == False:
                     # for each framework pick one and move it to running, iff running has an empty slot.
@@ -466,7 +538,8 @@ class Scheduler:
                     self.dbinstance.lock.release()
 
                     lctx.info("< %s" % t.testobj.TestInputData.testid)
-		
+
+		    # put the test in dispatch queue
 		    self.dispatchQ__lock.acquire()
                     self.dispatch_queue[k] = t
                     self.dispatchQ__lock.release()
@@ -475,6 +548,7 @@ class Scheduler:
                     self.dbinstance.mon_thread[0].resume()
 
                     try:
+			# Bind a seperate trigger thread for this test to start test execution
                         trigger_thread = common.FuncThread(self.trigger, True, t)
                         dispatch_threads[t.testobj.TestInputData.testid] = (trigger_thread, t)
                         trigger_thread.start()
@@ -488,6 +562,7 @@ class Scheduler:
                         lctx.debug(e)
 
 	    try:
+		# Log list of test currently present in dispatch queue in scheduler debug file
                 d = "DISPATCH [S/R] : "
                 for k in self.dispatch_queue:
                     d = d + " |" + str(self.dispatch_queue[k].testobj.TestInputData.testid)
@@ -501,19 +576,29 @@ class Scheduler:
 
 
     def testmon(self, *mon):
+	"""
+	Testmon continuously monitors all the running test. It keeps on checking test status on a exec host where execution
+	script is running. If anything goes wrong with the test execution, this thread trigger termination actions for
+	this test. It also trigger graceful test termination and logs collection when test finishes on exec host
+
+	"""
         process_results_threads = defaultdict()
         while True:
             d = "TSMON [R] : |"
             remove = False
             error = False
 
+	    # Continuously iterate over running test list for checking test status
             for k in self.running_tests:
                 if self.running_tests[k] is not None:
                     t = self.running_tests[k]
 
-                    serialize_str = t.serialize();
+                    serialize_str = t.serialize()
                     t2 = testobj.testDefn()
                     t2.deserialize(serialize_str)
+
+		    # Initiating test logger for capturing test life cycle on scheduler, all logs are logged in
+                    # file <testid>.log
 		    test_logger = LOG.gettestlogger(t2, "EXEC")
                     if t.testobj.TestInputData.testid != t2.testobj.TestInputData.testid:
                         lctx.error("testobj not same")
@@ -522,6 +607,7 @@ class Scheduler:
                         break  # out of for loop
 
                     try:
+			# Send DAYTONA_GET_STATUS message on exec host mentioned in test for checking test status
                         ret = self.cl.send(t.testobj.TestInputData.exechostname, self.CPORT,
                                            self.ev.construct("DAYTONA_GET_STATUS",
                                                              str(t2.testobj.TestInputData.testid)))
@@ -535,12 +621,17 @@ class Scheduler:
                         break  # out of for loop
 
                     if status == "RUNNING":
+			# If the test is in running state, then we need to verify that user hasn't terminated this
+                        # test from UI. If user has terminated then testmon will stop test execution on all exec host
+                        # and stat host
                         found = checkTestRunning(t.testobj.TestInputData.testid)
                         if not found:
                             error = True
                             break
                         d = d + str(self.running_tests[k].testobj.TestInputData.testid) + "|"
                     elif status in ["TESTEND", "TIMEOUT"]:
+			# If test ends on exec host or if test timout occurs then trigger graceful shutdown of this test
+                        # Testmon invoke a new thread for this test for logs download and test cleanup from all hosts
                         d = d + "*" + str(self.running_tests[k].testobj.TestInputData.testid) + "*|"
                         if t.testobj.TestInputData.end_status == "running":
                             lctx.debug(t.testobj.TestInputData.end_status)
@@ -550,6 +641,7 @@ class Scheduler:
                             else:
                                 t.updateStatus("running", "completed")
 
+			    # process_results download log files and perform cleanup on all other hosts
                             pt = common.FuncThread(self.process_results, True, t,
                                                    t.testobj.TestInputData.end_status)
                             process_results_threads[t.testobj.TestInputData.testid] = (pt, t)
@@ -567,6 +659,7 @@ class Scheduler:
                             break  # out of for loop
                             
                     elif status.strip() in ["FAILED", "TESTNA"]:
+			# Test termination if test fails or test is not even running on the host
                         if status.strip() == "FAILED":
                             error = True
                         elif status.strip() in ["ABORT", "TESTNA"]:
@@ -575,6 +668,7 @@ class Scheduler:
                         lctx.error("TEST " + status.strip() + " : Cleaning test from running queue")
                         break  # out of for loop
                     else:
+			# Test termination on receiving any unknown test state
                         remove = True
                         t.updateStatus("running", "failed")
                         lctx.error(
@@ -585,7 +679,14 @@ class Scheduler:
                 lctx.info(d)
                 d = ""
 
+	    # Two modes of test termination:
             if error:
+		# If error is set then testmon will perform below steps:
+                # 1. Send test ABORT on exec host if is alive, this will stop execution script, perform logs cleanup and
+                #    test termination on the host
+                # 2. Send test cleanup on all other stat host for performing logs cleanup and test termination on the host
+                # 3. Remove test from the scheduler running queue
+
                 retsend = None
 		test_logger.error("Bad test status " + status + " - Terminating test")
                 ip = t.testobj.TestInputData.exechostname
@@ -624,6 +725,7 @@ class Scheduler:
                 self.lock.release()
 
             if remove:
+		# If remove flag is set, then testmon will only delete this test from the running queue of scheduler
                 self.lock.acquire()
                 for k in self.running_tests:
                     if self.running_tests[k].testobj.TestInputData.testid == t.testobj.TestInputData.testid:
@@ -638,6 +740,13 @@ class Scheduler:
 
 
 def daytonaCli(self, *args):
+    """
+    This is daytona CLI command handler when scheduler receives any request from Daytona cli script to perform
+    any task. Daytona cli provide ability to get framework definition, add test for particular framework, run test,
+    update test details and fetch test results. User need to provide daytona credentials in order to execute commands
+    using daytona CLI scripts
+
+    """
     (obj, command, params, actionID, sync) = (args[0], args[1], args[2], args[3], args[4])
     lctx = LOG.getLogger("scheduler-clilog", "DH")
 
@@ -645,9 +754,11 @@ def daytonaCli(self, *args):
     if len(cli_param_map) != 3:
         return "Error|Not enough arguments"
 
+    # Retriveing username and password from CLI command for authentication
     user = cli_param_map['user']
     password = cli_param_map['password']
 
+    # Retriveing actual daytona command and associated parameter from CLI command
     cli_command = cli_param_map['param'].split("|")[0]
     cli_param = cli_param_map['param'].split("|")[1]
 
@@ -655,10 +766,12 @@ def daytonaCli(self, *args):
 
     db = dbCliHandle()
 
+    # Calling authenticate_user webservice for verifying username and password combination
     auth = db.authenticate_user(user, password)
     if auth != "SUCCESS":
         return auth
 
+    # Invoke function based on CLI action mentioned on CLI command
     if cli_command == "get_frameworkid_arg":
         arglist = db.getFrameworkIdArgs(cli_param)
         return arglist
@@ -714,11 +827,18 @@ def daytonaCli(self, *args):
 
 
 def checkTestRunning(testid):
+    """
+    This function checks whether user has not initiated test termination from UI. CommonFrameworkSchedulerQueue table
+    keep the list of all running test initiated by user from UI or CLI. When user terminate any running test from UI,
+    daytona removes the entry of this test from CommonFrameworkSchedulerQueue table. This functions polls database to
+    check if test is still present in the CommonFrameworkSchedulerQueue table
+
+    """
     lctx = LOG.getLogger("dblog", "DH")
     cfg = config.CFG("DaytonaHost", lctx)
     cfg.readCFG("config.ini")
     db = dbaccess.DBAccess(cfg, LOG.getLogger("dblog", "DH"))
-    check = db.query("""SELECT COUNT(*) FROM CommonFrameworkSchedulerQueue where testid=%s""", (testid,), False, False);
+    check = db.query("""SELECT COUNT(*) FROM CommonFrameworkSchedulerQueue where testid=%s""", (testid,), False, False)
     db.close()
     if check[0] == 0:
         return False
@@ -734,9 +854,13 @@ if __name__ == "__main__":
     cfg.readCFG("config.ini")
 
     common.logger.ROLE = "DHOST"
+    # Start DBmon thread for polling DB to check test initiated by user
     db = dbaccess.DaytonaDBmon(cfg, LOG.getLogger("dblog", "DH"))
+
+    # Instantiating Scheduler object which intiate variables used by scheduler process
     sch = Scheduler(db, cfg, LOG.getLogger("schedulerlog", "DH"))
 
+    # TCP server setup for listening daytona messages from agent on scheduler port
     server.serv.role = "DH"
     ase_serv = server.serv()
     server.serv.lctx = LOG.getLogger("listenerlog", "DH")
@@ -755,20 +879,13 @@ if __name__ == "__main__":
     lctx.info("Server loop running in thread:" + server_thread.name)
     lctx.info("Server started @ %s:%s" % (ip, port))
 
+    # Starting dispatch thread which serialize test execution
     sch.scheduler_thread.start()
     time.sleep(5)  # wait for 5 secs to dispatch DS to be loaded
+    # Starting test mon which keep track of all running tests
     sch.testmon_thread.start()
 
     server_thread.join()
     lctx.info("Server thread ended")
     lctx.info("DB Mon thread ended")
     lctx.info("Schedule thread ended")
-
-    # Scheduler
-    # Start listener
-    # Start DB mon : DB is checked and "ready to run" is picked and maintained in a hash-q (test obj is cobstructed in DB mon and put in Q):
-    # Start client check thread: loop thru all "current exec" list and fetch status, take action on each status, update DB with finished
-    # Start loop to pick items from DB_MON.hash-q and process , set DB to "running"
-    # Fork out parallel exec for each framework in Q and add in "current exec"
-    # USE DB to get FW args, details, params and setup tests (the process)
-

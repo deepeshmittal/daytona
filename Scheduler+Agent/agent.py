@@ -1,6 +1,7 @@
-#!/usr/bin/env python
-# -*- coding:cp949 -*-
+# This is main file for agent process, this file start agent process on the host. Agent process communicate with
+# scheduler for test execution and SAR data collection
 
+#!/usr/bin/env python
 import threading
 import SocketServer
 import time
@@ -14,29 +15,26 @@ import testobj
 import system_metrics_gather
 from logger import LOG
 
-
+# Main function
 if __name__ == "__main__":
-    # Port 0 means to select an arbitrary unused port
-    lctx = LOG.getLogger("agentlog","Agent")
+
+    lctx = LOG.getLogger("agentlog", "Agent")
     cfg = config.CFG("Agent", lctx)
     cfg.readCFG("config.ini")
 
     HOST = common.get_local_ip()
     PORT = cfg.CPORT
 
+    # Creating daytona agent dir for saving execution script and SAR log files
     common.createdir(cfg.daytona_agent_root, lctx)
 
     server.serv.role = "Agent"
     base_serv = server.serv()
 
-    #server.serv.lctx = LOG.getLogger("listenerlog","Agent")
-    #ser = server.serv.ThreadedTCPServer((HOST, PORT), server.serv.ThreadedTCPRequestHandler)
-
+    # Initiating TCP server for listening daytona message from scheduler
     ser = base_serv.ThreadedTCPServer((HOST, PORT), server.serv.ThreadedTCPRequestHandler)
     server.serv.serverInstance = ser
     ip, port = ser.server_address
-
-    #server.lctx = LOG.getLogger("listenerlog", "Agent")
 
     # Start a thread with the server -- that thread will then start one
     # more thread for each request
@@ -46,21 +44,21 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
 
-    # Start system metrics gather threads
+    # Start system metrics gather threads, this will start multiple threads for various SAR data collection
     system_metrics_gather.init_sar_iostat_top()
 
     # Setup test log directory
     common.createdir(cfg.daytona_agent_root, lctx)
     log_dir = cfg.daytona_agent_root + "test_logs/"
-    common.createdir(log_dir,lctx)
+    common.createdir(log_dir, lctx)
 
     lctx.info("Server loop running in thread:" + server_thread.name)
     lctx.info("Server started @ %s:%s" % (ip, port))
 
-    #list of current exec ASYNC jobs
-    #print actc.async_actions
+    # list of current exec ASYNC jobs
+    # print actc.async_actions
 
-    while True :
+    while True:
         if server.serv.actc is not None:
             d = "ASYNC Jobs ["
             lctx.debug(server.serv.actc.async_actions)
@@ -74,4 +72,3 @@ if __name__ == "__main__":
         time.sleep(2)
 
     server_thread.join()
-    lctx.info("Server thread ended")

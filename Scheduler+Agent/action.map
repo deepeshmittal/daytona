@@ -5,8 +5,6 @@ DAYTONA_ABORT_TEST,action,abortTest,T,to end a test,E
 DAYTONA_CLEANUP_TEST,action,cleanup,T,to end a test,E
 DAYTONA_FINISH_TEST,action,setFinish,T,to end a test,E
 DAYTONA_GET_STATUS,action,getStatus,T,to get status of a test,E
-DAYTONA_PREPARE_RESULTS,action,prepareResults,T,to prep results/stats,H
 DAYTONA_FILE_DOWNLOAD,action,fileDownload,T,to download file,E
 DAYTONA_HEARTBEAT,action,heartbeat,T,to rcv heartbeat to host,H
 DAYTONA_CLI,scheduler,daytonaCli,T,to execute cli commands on host,H
-DAYTONA_LOG,action,log,T,log statements,*

@@ -1,9 +1,13 @@
 #!/usr/bin/env python
-# -*- coding:cp949 -*-
 import ConfigParser
 
 
 class CFG:
+    """
+    This class is used for reading Daytona scheduler/agent configuration file. It maps configuration file value into
+    specific variable of this class
+
+    """
     def __init__(self, role, lctx):
         self.actionMap = {}
         self.role = role
@@ -52,4 +56,3 @@ class CFG:
 	self.execscript_location = Config.get('AGENT', 'execscript_location')
 	self.agent_test_logs = Config.get('AGENT', 'agent_test_logs_location')
         self.CPORT = int(Config.get('AGENT', 'port'))
-

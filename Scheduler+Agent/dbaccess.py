@@ -1,7 +1,9 @@
+# This file provide routines for scheduler to interact with database. It also implement class which defines DBmon
+# thread which continuously query DB for new test in waiting queue
+
 #!/usr/bin/env python
-# -*- coding:cp949 -*-
 import mysql.connector
-from mysql.connector import Error as DBERROR
+from mysql.connector import Error as Dberror
 import testobj
 import time
 import os
@@ -12,32 +14,49 @@ from collections import defaultdict
 
 import common
 
-#todo : write client interface to dump all thread and Q information at anytime, operational tool
+
 class DBAccess():
+    """
+    This class implements DB interaction routines
+    """
     cfg=None
+
     def __init__(self, cfg, lctx):
-      self._db_connection = None
-      self._db_cur = None
-      self.cfg = cfg
-      self.lctx = lctx
-      try:
-          if (self._db_connection and self._db_cur) and (self._db_cur is not None ) and (self._db_connection is not None):
+        """
+        Contructor : Initializes DB connection with config parameters provided in config file
+
+        """
+        self._db_connection = None
+        self._db_cur = None
+        self.cfg = cfg
+        self.lctx = lctx
+        try:
+            if (self._db_connection and self._db_cur) and (self._db_cur is not None) and (self._db_connection is not None):
+                self._db_cur.close()
+                self._db_connection.close()
+
+            self._db_connection = mysql.connector.connect(host=cfg.mysql_host, database=cfg.msql_db,
+                                                          user=cfg.mysql_user, password=cfg.mysql_password)
+            self._db_cur = self._db_connection.cursor()
+
+            self.lctx.debug('Connected to MySQL database')
+        except Dberror as e:
+            self.lctx.error(e)
+
+    def close(self):
+        """
+        Close DB connection
+
+        """
+        if (self._db_connection and self._db_cur) and (self._db_cur is not None) and (self._db_connection is not None):
             self._db_cur.close()
             self._db_connection.close()
 
-          self._db_connection = mysql.connector.connect(host=cfg.mysql_host,database=cfg.msql_db,user=cfg.mysql_user,password=cfg.mysql_password)
-          self._db_cur = self._db_connection.cursor()
-
-          self.lctx.debug('Connected to MySQL database')
-      except DBERROR as e:
-          self.lctx.error(e)
-
-    def close(self):
-        if (self._db_connection and self._db_cur) and (self._db_cur is not None ) and (self._db_connection is not None):
-          self._db_cur.close()
-          self._db_connection.close()
-
     def query(self, query, params, n, commit, lastid=False, rowcount=False):
+        """
+        Execute database query and returns the result based on input flag
+
+        """
         try:
             self._db_cur.execute(query, params)
             if commit:
@@ -50,57 +69,60 @@ class DBAccess():
                 return self._db_cur.fetchone()
             else:
                 return self._db_cur.fetchall()
-        except DBERROR as err:
+        except Dberror as err:
             self.lctx.debug(err)
 
-
     def commit(self):
+        """
+        Commiting DB changes in current transaction
+
+        """
         self._db_connection.commit()
 
     def rollback(self):
+        """
+        Rollback DB changes in current transaction
+
+        """
         self._db_connection.rollback()
 
     def __del__(self):
+        """
+        Destructor: Destroys db connection
+
+        """
         self._db_connection.close()
 
 
 class DaytonaDBmon():
+    """
+    DBmon class implement routine that continuously query database for new tests in waiting queue. As soon as new test
+    comes in the queue, this routine picks up this test creates directory in daytona file system for this test and put
+    this test in DBmon queue. Later dispatch thread pick up this test for further execution
+
+    """
     mon_thread = []
     lock = threading.Lock()
     tests_to_run = defaultdict(list)
-    cfg=None
+    cfg = None
 
     def __init__(self, cfg, lctx):
-      self.lctx = lctx
-      self.db = DBAccess(cfg,lctx)
-      self.cfg = cfg
-      self.startMon()
-      print "CFG in init :"
-      print self.cfg.mysql_host
+        self.lctx = lctx
+        self.db = DBAccess(cfg, lctx)
+        self.cfg = cfg
+        self.startMon()
+        print "CFG in init :"
+        print self.cfg.mysql_host
 
-      common.createdir(cfg.daytona_dh_root, self.lctx)
+        common.createdir(cfg.daytona_dh_root, self.lctx)
 
-      time.sleep(5) # wait for 5 secs for all recs to be loaded into map
+        time.sleep(5)  # wait for 5 secs for all recs to be loaded into map
 
     def __del__(self):
-      self.db.close()
-
-    #def createdir(self, dirent):
-    #  print "entry"
-    #  print dirent
-    #  if dirent == "" or dirent is None:
-    #    raise Exception("create dir failed", dirent)
-
-    #  if not os.path.exists(os.path.dirname(dirent)):
-    #    os.makedirs(os.path.dirname(dirent))
-    #    self.lctx.debug("created:" + dirent) 
-    #  else:
-    #    self.lctx.debug("dir exists:" + dirent)
-
+        self.db.close()
 
     def mon(self, *args):
       #query all waiting state tests and load into to_schedule, this is for restart case (similarly for running)
-      #todo : reconcile running and scheduled testids, if db altered externally
       restarted = True
       print "CFG in mon :"
       print self.cfg.mysql_host
@@ -160,7 +182,6 @@ class DaytonaDBmon():
             to = testobj.testDefn()
             to.testobj.TestInputData.testid = testid[0]
 
-            #todo handle return status
             res = to.construct(testid[0])
 
             #create required dirs and setup server side env
@@ -195,7 +216,7 @@ class DaytonaDBmon():
 
             #use a lock here
             self.lock.acquire()
-            self.tests_to_run[to.testobj.TestInputData.frameworkid].append(to);
+            self.tests_to_run[to.testobj.TestInputData.frameworkid].append(to)
             self.lctx.debug("Adding : " + str(to.testobj.TestInputData.testid))
             self.lock.release()
 
@@ -203,10 +224,10 @@ class DaytonaDBmon():
 
         if self.mon_thread[0].check() == False :
           return
-        time.sleep(5) #todo : make this config item
+        time.sleep(5)
+
 
     def startMon(self):
-      mthread = None
-      mthread = common.FuncThread(self.mon, True)
-      self.mon_thread.append(mthread)
-      mthread.start()
+        mthread = common.FuncThread(self.mon, True)
+        self.mon_thread.append(mthread)
+        mthread.start()

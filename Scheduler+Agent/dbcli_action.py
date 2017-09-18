@@ -1,3 +1,5 @@
+# This file implement handlers for all Daytona CLI commands
+
 import dbaccess
 import config
 import pickle
@@ -9,18 +11,37 @@ from logger import LOG
 HOST_IP_PREFIX = 'http://'  # change this to 'https' for SSL connections
 HOST_IP_SUFFIX = '/verifyuser.php'
 
+
 class dbCliHandle():
+    """
+    This class implement Daytona CLI action handler, it interact with database to make changes in tables based on action
+    and input arguments. pickle load and dump are used here to convert dictionary, tuple etc into string and vice-versa
+
+    """
     def __init__(self):
+        """
+        Constructor initializes logger, config file reader and db handle
+
+        """
         self.lctx = LOG.getLogger("dblog", "DH")
         self.cfg = config.CFG("DaytonaHost", self.lctx)
         self.cfg.readCFG("config.ini")
         self.db = dbaccess.DBAccess(self.cfg, self.lctx)
 
     def __del__(self):
+        """
+        Destructor destroys db handle
+
+        """
         if self.db is not None:
             self.db.close()
 
     def getFrameworkIdArgs(self, frameworkid):
+        """
+        This procedure fetches framework arguments for a given frameworkid. This is used when user tries to define new
+        test
+
+        """
         try:
             query_res = self.db.query(
                 """SELECT frameworkname FROM ApplicationFrameworkMetadata WHERE frameworkid = %s""",
@@ -37,6 +58,11 @@ class dbCliHandle():
             return "Error|Something went wrong with db while fetching arguments"
 
     def getFrameworkArgs(self, frameworkname):
+        """
+        This procedure fetches framework arguments for a given framework name. This is used when user tries to define new
+        test
+
+        """
         try:
             query_res = self.db.query(
                 """SELECT frameworkid FROM ApplicationFrameworkMetadata WHERE frameworkname = %s""",
@@ -54,6 +80,10 @@ class dbCliHandle():
             return "Error|Something went wrong with db while fetching arguments"
 
     def addTest(self, testdetails, username, state='new'):
+        """
+        This procedure add test in database with new test definition provided by user
+
+        """
         testdetails_map = pickle.loads(testdetails)
         if all(k in testdetails_map for k in (
                 "frameworkid", "frameworkname", "title", "exec_host", "cc", "priority", "purpose", "timeout",
@@ -123,9 +153,11 @@ class dbCliHandle():
                             if not query_res:
                                 raise Exception("Error|Adding statistics host for the test failed")
 
-		    # Adding PERF profiler
+                    # Adding PERF profiler
 
-		    query_res = self.db.query("""INSERT INTO ProfilerFramework (profiler, testid, processname, delay, duration) VALUES (%s, %s, %s, %s, %s)""",('PERF', testid, None, 10, 10), False, False)
+                    query_res = self.db.query(
+                        """INSERT INTO ProfilerFramework (profiler, testid, processname, delay, duration) VALUES (%s, %s, %s, %s, %s)""",
+                        ('PERF', testid, None, 10, 10), False, False)
 
                     self.db.commit()
                     return "SUCCESS|" + str(testid)
@@ -140,10 +172,15 @@ class dbCliHandle():
             return str(err)
 
     def runTest(self, testid, username):
+        """
+        This procedure start execution of a test with given testid by adding this test into CommonFrameworkSchedulerQueue
+        table from where scheduler picks it up for further execution
 
+        """
         try:
             # Verify whether test ID is valid
-            query_res = self.db.query("""SELECT username FROM TestInputData WHERE testid = %s""", (testid,), False, False)
+            query_res = self.db.query("""SELECT username FROM TestInputData WHERE testid = %s""", (testid,), False,
+                                      False)
             if not query_res:
                 raise Exception("Error|Test ID is not valid")
 
@@ -170,38 +207,43 @@ class dbCliHandle():
             return str(err)
 
     def getResult(self, testid, username):
+        """
+        This procedure reads results.csv for a given test and send it to Daytona CLI client which display this output on
+        terminal
 
+        """
         try:
             # Verify whether test ID is valid
-            query_res = self.db.query("""SELECT username,frameworkid FROM TestInputData WHERE testid = %s""", (testid,), False, False)
+            query_res = self.db.query("""SELECT username,frameworkid FROM TestInputData WHERE testid = %s""", (testid,),
+                                      False, False)
             if not query_res:
                 raise Exception("Error|Test ID is not valid")
 
-	    frameworkid = query_res[1]
+            frameworkid = query_res[1]
 
             if query_res[0] != username:
                 raise Exception("Error|User is not authorised to get results for this test")
-	    
+
             query_res = self.db.query(
                 """SELECT frameworkname FROM ApplicationFrameworkMetadata WHERE frameworkid = %s""",
                 (frameworkid,), False, False)
 
-	    frameworkname = query_res[0]
-	    
-	    query_res = self.db.query(
-                """SELECT hostname FROM HostAssociation JOIN HostAssociationType USING(hostassociationtypeid) WHERE testid = %s and name = %s""",
-                (testid,'execution'), False, False)
-            
-	    exec_host = query_res[0] 
-	    prefix=self.cfg.daytona_dh_root +"/"+ frameworkname + "/" + testid + "/" + "results" + "/" + exec_host + "/"
-	    filename = prefix + "results.csv"
-	    with open(filename, 'rb') as handle:
-    		data = handle.read()
+            frameworkname = query_res[0]
 
-	    self.lctx.info(data)
+            query_res = self.db.query(
+                """SELECT hostname FROM HostAssociation JOIN HostAssociationType USING(hostassociationtypeid) WHERE testid = %s and name = %s""",
+                (testid, 'execution'), False, False)
+
+            exec_host = query_res[0]
+            prefix = self.cfg.daytona_dh_root + "/" + frameworkname + "/" + testid + "/" + "results" + "/" + exec_host + "/"
+            filename = prefix + "results.csv"
+            with open(filename, 'rb') as handle:
+                data = handle.read()
+
+            self.lctx.info(data)
             return "SUCCESS|" + data
-	except (OSError, IOError) as e:
-	    self.db.rollback()
+        except (OSError, IOError) as e:
+            self.db.rollback()
             self.lctx.debug(e)
             return "Error|File Not Found"
         except Exception as err:
@@ -209,10 +251,14 @@ class dbCliHandle():
             self.lctx.debug(err)
             return str(err)
 
-
     def getTestByID(self, testid):
+        """
+        Display test details for a given testid on terminal
+
+        """
         test_details = {}
         try:
+            # Fetch test data from TestInputData table
             query_res = self.db.query(
                 """SELECT testid, frameworkname, TestInputData.title, TestInputData.purpose, priority, timeout, cc_list, testid, frameworkid, TestInputData.modified, TestInputData.creation_time, start_time, end_time, end_status, username FROM TestInputData JOIN ApplicationFrameworkMetadata USING(frameworkid) WHERE testid = %s""",
                 (testid,), False, False)
@@ -235,6 +281,7 @@ class dbCliHandle():
             test_details['status'] = query_res[13]
             test_details['user'] = query_res[14]
 
+            # Fetch test host information from HostAssociation table
             query_res = self.db.query(
                 """SELECT name, hostname FROM HostAssociation JOIN HostAssociationType USING(hostassociationtypeid) WHERE testid = %s""",
                 (testid,), True, False)
@@ -253,6 +300,7 @@ class dbCliHandle():
             if 'exec_host' not in test_details:
                 test_details['exec_host'] = ''
 
+            # Fetch test argument details from TestArgs table
             query_res = self.db.query(
                 """SELECT argument_name, argument_value FROM TestArgs JOIN ApplicationFrameworkArgs USING(framework_arg_id) WHERE testid = %s ORDER BY testargid""",
                 (testid,), True, False)
@@ -271,6 +319,10 @@ class dbCliHandle():
             return str(err)
 
     def updateTest(self, test_details, username, state='new'):
+        """
+        Update any existing test with new details provided by CLI command
+
+        """
 
         testdetails_map = pickle.loads(test_details)
         frameworkid = testdetails_map['frameworkid']
@@ -352,6 +404,15 @@ class dbCliHandle():
             return str(err)
 
     def authenticate_user(self, luser, lpassword):
+        """
+        This procedure calls verifyuser webservice for matching username and password combination saved in DB. This
+        is required to verify user who is issuing command from daytona CLI
+
+        """
+        # todo : This is hacky way of doing this verification. Need to remove this once we figure out converting plain
+        # password into PHP hashes which are saved in database. Then just query database for matching hash rather than
+        # calling PHP webservice for verification
+
         res = requests.post(HOST_IP_PREFIX + 'localhost' + HOST_IP_SUFFIX, data={'user': luser, 'password': lpassword})
         if res.status_code != 200:
             if res.status_code == 401:
@@ -360,4 +421,3 @@ class dbCliHandle():
                 return "Error|User authentication failed with HTTP error code : " + str(res.status_code)
         else:
             return "SUCCESS"
-

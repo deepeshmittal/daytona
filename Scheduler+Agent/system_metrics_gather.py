@@ -1,3 +1,7 @@
+# This file implement different thread routines which spaws on agent startup and continue to run until agnet is up.
+# These threads continuously query stats from the linux system and write designated log file for a particular test if
+# it is currently running on agent
+
 #!/usr/bin/env python
 
 import os
@@ -38,6 +42,10 @@ awk = ["awk", "FNR == 1 {print $1}"]
 
 
 def loggersetup(filename):
+    """
+    Logger object setup for capturing system metric gather activity in a given debug file filename
+
+    """
     if os.path.isfile(filename):
         os.remove(filename)
 
@@ -58,14 +66,26 @@ def loggersetup(filename):
 
 
 def top_gather(self):
+    """
+    This method implement thread routine for querying TOP output in a fixed interval of time. If any test is in
+    running state on this agent then this routine append top_output.txt for this test with new stat values
+
+    """
     running_queue = {}
+
+    # execute top batch command
     p1 = subprocess.Popen(top_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     while True:
         output = p1.stdout.readline()
         if output == '' and p1.poll() is not None:
             break
         if output:
+            # Read new output
             output = output.rstrip()
+            # if output line starts with "top" then it need to dump current timestamp value. It also dump list of test
+            # currently in running state in seperate list. As this is the new output sequence, we want to start writing
+            # subsequent logs for currently running tests. Hence it won't check running test list until new output
+            # sequence
             if output.startswith('top'):
                 p2 = subprocess.Popen(date_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 timestamp = p2.communicate()[0].strip()
@@ -76,17 +96,21 @@ def top_gather(self):
                     if test.status == "RUNNING":
                         top_file = test.statsdir + "top_output.txt"
                         if os.path.isfile(top_file):
+                            # If file exists then append this new output squence in this file with current TS
                             with open(top_file, 'a') as fh:
                                 fh.write("\n" + timestamp + "\n")
                                 fh.write(output + "\n")
                                 sys_logger.debug("Generating top output for test : " + str(testid))
                         else:
+                            # If file doesn't exists then this is new test just started on agent, create
+                            # top_output.txt and dump this new output squence in this file with current TS
                             with open(top_file, 'w') as fh:
                                 fh.write(timestamp + "\n")
                                 fh.write(output + "\n")
                                 sys_logger.debug("Starting top output for test : " + str(testid))
                 continue
 
+            # Continuing writing output squence in files for running tests dump at the start of new squence
             for testid, test in running_queue.iteritems():
                 if test.status == "RUNNING":
                     top_file = test.statsdir + "top_output.txt"
@@ -96,12 +120,19 @@ def top_gather(self):
 
 
 def iostat_gather(self):
+    """
+    This method implement thread routine for querying IOSTAT output in a fixed interval of time. If any test is in
+    running state on this agent then this routine append seperate file for each io device it create for this test
+
+    """
     iostat_header = None
     device_header = 0
     device_list = []
     p1 = subprocess.Popen(iostat_get_header, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     output = p1.communicate()[0].strip()
     output = output.split("\n")
+
+    # Check header and device list from iostat output
     for header in output:
         header = header.strip()
         if header.startswith("Device"):
@@ -117,6 +148,7 @@ def iostat_gather(self):
             header = header.split(' ')
             device_list.append(header[0])
 
+    # Start IOSTAT batch command for continued output
     p2 = subprocess.Popen(iostat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     running_queue = {}
     timestamp = 0
@@ -129,6 +161,11 @@ def iostat_gather(self):
                 output = output.strip()
                 output = re.sub(' +', ' ', output)
                 output = output.replace(' ', ',')
+
+                # if output line starts with "Device" then it need to dump current timestamp value. It also dump list
+                # of test currently in running state in seperate list. As this is the new output sequence, we want to
+                # start writing subsequent logs for currently running tests. Hence it won't check running test list
+                # until new output sequence
                 if output.startswith("Device"):
                     p3 = subprocess.Popen(date_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     timestamp = p3.communicate()[0].strip()
@@ -141,17 +178,22 @@ def iostat_gather(self):
                 output_device = output[0]
                 output[0] = str(timestamp)
                 output = ",".join(output)
+
+                # Continuing writing output squence in files for running tests dump at the start of new squence
                 if output_device in device_list:
                     for testid, test in running_queue.iteritems():
                         if test.status == "RUNNING":
                             iostat_file_name = output_device + iostat_file_ext
                             iostat_file = test.statsdir + iostat_file_name
                             if os.path.isfile(iostat_file):
+                                # If file exists then append this new output squence in this file with current TS
                                 sys_logger.debug("Generating iostat output in " + iostat_file_name + " for test : "
                                                  + str(testid))
                                 with open(iostat_file, 'a') as fh:
                                     fh.write(output + "\n")
                             else:
+                                # If file doesn't exists then this is new test just started on agent, create
+                                # file and dump IOSTAT header in this file with current TS
                                 with open(iostat_file, 'w') as fh:
                                     sys_logger.debug("Starting " + iostat_file_name + " for test : " + str(testid))
                                     fh.write(iostat_header + "\n")
@@ -218,6 +260,7 @@ def sar_gather(self):
     p = subprocess.Popen(sar_cmd, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE)
 
+    # Flags for marking the output type based on header in output sequence
     print_cpu_plt = 0
     print_mem_plt = 0
     print_task_plt = 0
@@ -233,23 +276,30 @@ def sar_gather(self):
             output = re.sub(' +', ' ', output)
             output = output.replace(' ', ',')
             if cpu_plt_header in output:
+                # Set CPU usage output flag, print subsquent lines in cpu.plt, Also this is start of new output sequence
+                # hence dump the current timestamp value
                 print_cpu_plt = 1
-		p3 = subprocess.Popen(date_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                p3 = subprocess.Popen(date_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 timestamp = p3.communicate()[0].strip()
                 continue
             elif task_plt_header in output:
+                # Set task and context switch output flag, print subsquent lines in task.plt
                 print_task_plt = 1
                 continue
             elif nfs_plt_header in output:
+                # Set NFS activity output flag, print subsquent lines in nfs.plt
                 print_nfs_plt = 1
                 continue
             elif mem_plt_header in output:
+                # Set memory utilization output flag, print subsquent lines in mem.plt
                 print_mem_plt = 1
                 continue
             elif net_io_plt_header in output:
+                # Set network io activity output flag, print subsquent lines in seperate file for each io device
                 print_net_io_plt = 1
                 continue
             elif output == "":
+                # Set all flags to zero if blank line occur, this marks end of previously set flag
                 print_cpu_plt = 0
                 print_mem_plt = 0
                 print_task_plt = 0
@@ -257,10 +307,13 @@ def sar_gather(self):
                 print_nfs_plt = 0
                 continue
 
+            # Dump list of running test on agent in running_queue
             action.action_lock.acquire()
             running_queue = action.running_tests
-	    action.action_lock.release()
-	    if print_cpu_plt:
+            action.action_lock.release()
+
+            # Print appropriate plt files based on output flags
+            if print_cpu_plt:
                 output = output.split(",")
                 del output[:3]
                 for testid, test in running_queue.iteritems():
@@ -370,7 +423,6 @@ def sar_gather(self):
 
 
 def docker_stat_gather(self):
-
     # Checking docker version
     try:
         p1 = subprocess.Popen(docker_version, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -378,16 +430,18 @@ def docker_stat_gather(self):
         version = re.findall("\d+\.\d+", version)[0]
         version = float(version)
         if version < 10.0:
+            # Docker version less than 10 is not supported
             sys_logger.error("Docker version less than 10, not supported !! ")
             sys_logger.error("Aborting docker stat gather thread !! ")
             quit()
     except Exception:
+        # Docker is not installed, abort this thread
         sys_logger.error("Docker not installed !! ")
         sys_logger.error("Aborting docker stat gather thread !! ")
         quit()
 
     # Starting docker stats
-    # Spawning different thread for collecting docker stat as it takes some time collect the stats
+    # Spawning different thread for collecting docker stat as it takes some time to collect the stats
     while True:
         thread = common.FuncThread(collect_docker_stats, True)
         thread.start()
@@ -438,13 +492,24 @@ def collect_docker_stats(self):
 
 
 def strace_gather(self, testid, strace_config):
+    """
+    STRACE profiler collector based on configuration provided in strace_config for a given testid
+
+    """
     delay = float(strace_config['delay'])
     duration = strace_config['duration']
     process = strace_config['process']
+
     sys_logger.debug("Starting STRACE for Test " + str(testid) + " in " + str(delay) + " secs")
+
+    # Start STRACE collection after delay time provided by user
     time.sleep(delay)
     test = action.get_test(testid)
     strace_output_file = test.statsdir + "strace_output.txt"
+
+    # PID selection based on process name provided by user, if there are multiple PIDs for same process then it
+    # chooses the most active process in terms of cpu usage
+
     sys_logger.debug("Setting up STRACE for process : " + process)
     grep1 = ["grep", process]
     p1 = subprocess.Popen(get_pid, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -475,12 +540,18 @@ def strace_gather(self, testid, strace_config):
 
 
 def perf_gather(self, testid, perf_config):
+    """
+    PERF profiler collector based on configuration provided in perf_config for a given testid
+
+    """
     delay = float(perf_config['delay'])
     duration = perf_config['duration']
     sys_logger.debug("Starting PERF for Test " + str(testid) + " in " + str(delay) + " secs")
     time.sleep(delay)
     test = action.get_test(testid)
     perf_output_file = test.statsdir + "perf_output.txt"
+
+    # Starting system wide perf data collection
     perf_system_wide_cmd = ['perf', 'stat', '-e',
                             'cycles,instructions,LLC-load-misses,LLC-prefetch-misses,LLC-store-misses', '-a', '-o',
                             perf_output_file, "sleep", duration]
@@ -496,6 +567,8 @@ def perf_gather(self, testid, perf_config):
             with open(perf_output_file, 'w') as fh:
                 fh.write(error + "\n")
             return
+
+        # Configure perf for process level data collection, if process name is provided
         if "process" in perf_config:
             process = perf_config['process']
             sys_logger.debug("Setting up PERF for process : " + process)
@@ -529,6 +602,15 @@ def perf_gather(self, testid, perf_config):
 
 
 def init_sar_iostat_top():
+    """
+    Agent process invoke this method on startup. This will spawn 4 threads for system metrics collection. Below are
+    thread details:
+    1. top_gather - For TOP output collection
+    2. iostat_gather - For iostat output collection
+    3. sar_gather - For SAR data collection
+    4. docker_stat_gather - For docker stat of all active containers
+
+    """
     global sys_logger
     logger_file = os.getcwd() + "/system_metrics_gather_debug.out"
     sys_logger = loggersetup(logger_file)
@@ -548,6 +630,10 @@ def init_sar_iostat_top():
 
 
 def perf_strace_gather(testid, perf_config=None, strace_config=None):
+    """
+    Agent invoke this procedure on test startup for configuring profiler information provided in test details
+
+    """
     sys_logger.debug("Starting Profilers setup for test ID : " + str(testid))
     sys_logger.debug("Perf configuration details")
     if "process" in perf_config:
