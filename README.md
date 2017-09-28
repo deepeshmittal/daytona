@@ -23,7 +23,7 @@ Daytona is an application-agnostic framework for automated performance testing a
 * [Documentation Index](docs/Documentation.md)
 
 ## Contact
-* [Daytona-Dev](https://groups.google.com/d/forum/daytona-dev) for
+* [Daytona-Developers](https://groups.google.com/forum/#!forum/daytona-developers) for
   development discussions
 
 ## License
